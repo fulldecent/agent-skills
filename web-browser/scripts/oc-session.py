@@ -6,10 +6,10 @@ Usage:
   python3 oc-session.py <url> [--mode markdown|dom|ax|semantic] [--wait <seconds>]
 
 The openchrome HTTP daemon must already be running before calling this script.
-Start it with the bundled helper:
+Invoke the helper by absolute path. Do not cd into the skills repo:
 
-    ./scripts/openchrome-daemon.sh start headless
-    ./scripts/openchrome-daemon.sh start headed
+    ~/.agents/skills/web-browser/scripts/openchrome-daemon.sh start headless
+    ~/.agents/skills/web-browser/scripts/openchrome-daemon.sh start headed
 
 The daemon health endpoint (port 9090) confirms readiness:
   curl http://localhost:9090/health
@@ -34,9 +34,16 @@ DEFAULT_WAIT = 4  # seconds for JS to render after navigate
 
 def check_daemon():
     try:
-        with urllib.request.urlopen(DAEMON_HEALTH, timeout=3) as r:
+        with urllib.request.urlopen(DAEMON_HEALTH, timeout=5) as r:
             data = json.loads(r.read())
-            return data.get("status") == "ok"
+            if data.get("status") != "ok":
+                return False
+            chrome = data.get("chrome", {})
+            if not chrome.get("connected", False) or chrome.get("reconnecting", False):
+                sys.stderr.write(f"daemon healthy but Chrome not ready: {json.dumps(chrome)}\n")
+                sys.stderr.write("restart headed daemon: openchrome-daemon.sh stop && openchrome-daemon.sh start headed\n")
+                return False
+            return True
     except Exception as e:
         sys.stderr.write(f"daemon not reachable at {DAEMON_HEALTH}: {e}\n")
         return False
@@ -131,9 +138,9 @@ def main():
     if not check_daemon():
         sys.stderr.write(
             "start the daemon first:\n"
-            "  ./scripts/openchrome-daemon.sh start headless\n"
+            "  ~/.agents/skills/web-browser/scripts/openchrome-daemon.sh start headless\n"
             "or:\n"
-            "  ./scripts/openchrome-daemon.sh start headed\n"
+            "  ~/.agents/skills/web-browser/scripts/openchrome-daemon.sh start headed\n"
         )
         sys.exit(2)
 

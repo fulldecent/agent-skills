@@ -10,7 +10,7 @@ MCP session: navigate, click the row, wait for the SPA route to change, then rea
 This helper does exactly that against the already-running openchrome HTTP daemon.
 Start the daemon first (headed for authenticated sites):
 
-    ./scripts/openchrome-daemon.sh start headed
+    ~/.agents/skills/web-browser/scripts/openchrome-daemon.sh start headed
 
 Usage:
     python3 oc-open.py <url> --click "<visible text>" [options]
@@ -50,8 +50,16 @@ DEFAULT_WAIT = 7
 
 def check_daemon():
     try:
-        with urllib.request.urlopen(DAEMON_HEALTH, timeout=3) as r:
-            return json.loads(r.read()).get("status") == "ok"
+        with urllib.request.urlopen(DAEMON_HEALTH, timeout=5) as r:
+            data = json.loads(r.read())
+            if data.get("status") != "ok":
+                return False
+            chrome = data.get("chrome", {})
+            if not chrome.get("connected", False) or chrome.get("reconnecting", False):
+                sys.stderr.write(f"daemon healthy but Chrome not ready: {json.dumps(chrome)}\n")
+                sys.stderr.write("restart headed daemon: openchrome-daemon.sh stop && openchrome-daemon.sh start headed\n")
+                return False
+            return True
     except Exception as e:
         sys.stderr.write(f"daemon not reachable at {DAEMON_HEALTH}: {e}\n")
         return False
@@ -204,7 +212,7 @@ def main():
     if not check_daemon():
         sys.stderr.write(
             "start the daemon first:\n"
-            "  ./scripts/openchrome-daemon.sh start headed\n"
+            "  ~/.agents/skills/web-browser/scripts/openchrome-daemon.sh start headed\n"
         )
         sys.exit(2)
 

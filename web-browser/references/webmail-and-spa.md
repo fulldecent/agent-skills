@@ -1,96 +1,70 @@
-# Authenticated webmail and single-page apps
+# Proton Mail and other authenticated SPAs
 
-This reference covers opening and reading content that only appears after a click
-inside a single-page app (SPA) — webmail such as Proton Mail or Gmail, member
-portals, dashboards. The canonical `scripts/oc-session.py` cannot do this on its
-own. Use `scripts/oc-open.py` for these cases.
+Proton Mail has no SMTP or IMAP for this workflow. Use the website through the headed daemon and [../scripts/proton-mail.py](../scripts/proton-mail.py). Do not copy these steps into a project skill.
 
-Read `SKILL.md` first. This document is Mode B territory: the site is behind a
-login and you are already running the headed daemon.
+Read `SKILL.md` first. Mail is headed-only. The login lives in `$HOME/.openchrome/profile`. Leave that daemon running.
 
-## Why oc-session.py is not enough
+## Why this is a separate helper
 
-`oc-session.py` does exactly two things: navigate, then read. It cannot open an
-item that requires a click. Two facts make this a hard limit:
+`oc-session.py` navigates and reads one page. That is not enough for Proton:
 
-1. Each invocation of `oc-session.py` starts a **fresh MCP session with a new
-   tabId**. A click performed in one invocation is gone by the next. Navigate,
-   click, wait, and read must all happen inside a single MCP session.
-2. In an SPA the message body is not in the inbox document. Reading the inbox
-   again after a click returns the same list, which looks like "the click did
-   nothing."
+1. Each script invocation is a new MCP session. A click in one process is gone in the next.
+2. The inbox list is not the message. The body is decrypted in the browser and rendered in a sandboxed iframe.
+3. Decrypt is asynchronous. Reading too early looks like an empty inbox.
 
-If you only ever navigated and read, you never actually opened anything. Say
-"the inbox loaded, but I did not open a message" rather than concluding the
-browser cannot expose the body.
+`proton-mail.py` keeps navigate, wait-for-decrypt, click, and iframe read in one process.
 
-## The three gotchas
-
-### 1. Same-session navigate → click → wait → read
-
-Opening a message is one session: navigate to the inbox, click the exact row,
-wait for the SPA route to change, then read. `oc-open.py` does this in one
-process. Do not split these steps across separate `oc-session.py` or `oc run`
-calls.
-
-### 2. Confirm the click by the URL, not by confidence
-
-Natural-language clicking (`interact`) can silently hit the wrong element — for
-example the "New message" button instead of a conversation row. Opening a Proton
-message changes the URL to `/u/<n>/inbox/<conversation-id>`. Verify that the URL
-changed before trusting anything you read. `oc-open.py --expect-url "/inbox/"`
-fails loudly when the click missed.
-
-### 3. The message body is inside a sandboxed iframe
-
-Proton (and Gmail) render the sanitized message HTML inside an `<iframe>`.
-`read_page --mode markdown` of the parent document returns the app shell and the
-conversation list, never the body. Read the iframe explicitly:
-
-```js
-Array.from(document.querySelectorAll('iframe'))
-  .map(f => { try { return f.contentDocument?.body?.innerText || ''; } catch (e) { return ''; } })
-  .filter(t => t.trim())
-  .join('\n')
-```
-
-`oc-open.py --iframe` extracts the header and this iframe body for you and puts
-them first, so the large list view does not consume the character budget.
-
-## Canonical webmail workflow
+## Canonical Proton commands
 
 ```sh
-# 1. Start headed (the openchrome profile is its own profile; expect a fresh login)
-./scripts/openchrome-daemon.sh start headed
+SKILL="$HOME/.agents/skills/web-browser"
+"$SKILL/scripts/openchrome-daemon.sh" start headed
+"$SKILL/scripts/openchrome-daemon.sh" status   # confirms chrome.connected: true
 
-# 2. Confirm auth; if this redirects to the sign-in page, ask the user to log in
-#    in the visible Chrome window, then continue
-python3 ./scripts/oc-session.py https://mail.proton.me/u/0/inbox --mode markdown
-
-# 3. Open a specific message and read its body, all in one session
-python3 ./scripts/oc-open.py https://mail.proton.me/u/1/inbox \
-    --click "exact subject text from the list" \
-    --expect-url "/inbox/" \
-    --iframe --wait 10
-
-# 4. Stop when done
-./scripts/openchrome-daemon.sh stop
+python3 "$SKILL/scripts/proton-mail.py" inbox
+python3 "$SKILL/scripts/proton-mail.py" search "invoice"
+python3 "$SKILL/scripts/proton-mail.py" open --subject "exact subject from the list"
+python3 "$SKILL/scripts/proton-mail.py" compose \
+    --to someone@example.com --subject "Subject" --body "Body"
+python3 "$SKILL/scripts/proton-mail.py" compose \
+    --to someone@example.com --subject "Subject" --body "Body" --send
 ```
 
-Notes:
+Do not stop the daemon between these commands. Stopping headed Chrome drops the Proton session. The next chat will show the sign-in page with the password already filled. That is autofill, not a live session. Ask the user to click sign in once, then leave the daemon up.
 
-- the account path segment is `/u/<n>/`; the number is not always `0`. Read the
-  inbox first to learn which one is active (the page title shows the address).
-- SPAs render asynchronously. If a click reports `NOT FOUND`, the list had not
-  finished rendering — increase `--wait`.
-- the headed daemon uses openchrome's own profile at `~/.openchrome/profile`,
-  which is separate from your day-to-day Chrome profile. Being logged into Chrome
-  normally does not carry over; a fresh login in the openchrome window is
-  expected. Cookies in that profile may persist between daemon runs.
+The `stop` command is now more robust and will clean up stray processes that previously caused "port 3199 is occupied but the openchrome health check failed".
 
-## When to fall back to the raw MCP tools
+## Login and decrypt
 
-`oc-open.py` matches a row by visible text. If a subject is ambiguous or the
-element is not text-addressable, drive the daemon directly: use `find` to get a
-stable ref, then `interact`/`computer` with that ref, then the iframe read above.
-Keep it all in one MCP session.
+1. Start headed. Confirm `status` shows `chrome.connected: true` (or `ready: true`).
+2. Run `proton-mail.py inbox`.
+3. If stderr says the login page is showing, stop. Ask the user to click sign in in the visible window. Do not type the password in chat.
+4. Run `inbox` again. The helper waits until rows appear and the decrypt banner is gone.
+5. If rows are still missing, raise `--wait`. Twelve seconds is the default because Proton decrypts locally.
+
+The helpers now reject a daemon whose Chrome connection is dead. The `status` command shows both health and readiness.
+
+The account path is `/u/<n>/`. It is not always `0`. After a successful inbox load, reuse the printed URL.
+
+## Opening a message
+
+`open` clicks the shortest visible row that contains the subject, then waits for `/inbox/<id>` or `/all-mail/<id>`, then reads the iframe.
+
+If the body is empty, decrypt is still running or the click missed. Quote the stderr and retry with a longer `--wait` or a more specific `--subject`. Do not fall back to `read_page` on the parent document. That page is the app shell.
+
+## Search, draft, send
+
+- `search` opens all-mail with `#keyword=`. It lists matching rows. It does not open a message.
+- `compose` without `--send` fills to, subject, and body and leaves the draft open.
+- `compose --send` clicks send after the fields are filled. Confirm the recipient with the user before `--send`.
+
+## Non-mail SPAs
+
+For a member portal or other click-to-open page that is not Proton, use [../scripts/oc-open.py](../scripts/oc-open.py) the same way: one process, `--expect-url`, and `--iframe` when the payload is inside a frame.
+
+## What not to do
+
+- do not drive Proton with `oc-session.py` plus ad-hoc `javascript_tool` calls
+- do not write a project-local Proton script
+- do not start headless, then hope cookies appear
+- do not treat a filled password field as logged in
